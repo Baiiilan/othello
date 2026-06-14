@@ -1245,20 +1245,15 @@ const container = document.getElementById('container');
 function detectDevice() {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
-  // Mobile: narrow screen OR portrait orientation on tablet
   const isMobile = vw <= 768 || (vh > vw && vw <= 1024);
   CFG = isMobile ? MOBILE_CFG : DESKTOP_CFG;
-  // Debug: show what was detected (check browser console on mobile)
-  const label = isMobile ? 'MOBILE' : 'DESKTOP';
-  console.log(`[DETECT] ${label}  inner=${vw}x${vh}  canvas=${CFG.WINDOW_W}x${CFG.WINDOW_H}  scale=${Math.min(vw/CFG.WINDOW_W, vh/CFG.WINDOW_H, 1.0).toFixed(3)}`);
-  // Also show on screen for 3 seconds (visible on mobile without devtools)
-  mainCtx.save();
-  mainCtx.fillStyle = 'rgba(0,0,0,0.8)';
-  mainCtx.fillRect(0, 0, CFG.WINDOW_W, 40);
-  mainCtx.fillStyle = '#0f0';
-  mainCtx.font = '14px monospace';
-  mainCtx.fillText(`[${label}] inner=${vw}x${vh} canvas=${CFG.WINDOW_W}x${CFG.WINDOW_H} scale=${(Math.min(vw/CFG.WINDOW_W, vh/CFG.WINDOW_H, 1.0)).toFixed(3)}`, 10, 26);
-  mainCtx.restore();
+  // Store for debug display after canvas init
+  window.__debugInfo = {
+    label: isMobile ? 'MOBILE' : 'DESKTOP',
+    vw, vh,
+    cw: CFG.WINDOW_W, ch: CFG.WINDOW_H,
+    scale: Math.min(vw / CFG.WINDOW_W, vh / CFG.WINDOW_H, 1.0),
+  };
 }
 
 function resizeCanvas() {
@@ -1299,6 +1294,19 @@ function init() {
   drawOffscreenBackground();
   loadBackground();
   showMenu();
+  // Debug overlay: show device info on screen for 5 seconds
+  if (window.__debugInfo) {
+    const d = window.__debugInfo;
+    console.log(`[DETECT] ${d.label}  inner=${d.vw}x${d.vh}  canvas=${d.cw}x${d.ch}  scale=${d.scale.toFixed(3)}`);
+    mainCtx.save();
+    mainCtx.fillStyle = 'rgba(0,0,0,0.85)';
+    mainCtx.fillRect(0, 0, CFG.WINDOW_W, 44);
+    mainCtx.fillStyle = '#0f0';
+    mainCtx.font = '14px "Courier New", Courier, monospace';
+    mainCtx.fillText(`[${d.label}] inner=${d.vw}x${d.vh} canvas=${d.cw}x${d.ch} scale=${d.scale.toFixed(3)}`, 12, 28);
+    mainCtx.restore();
+    setTimeout(() => { if (App.screen === 'MENU') showMenuScreen(); }, 5000);
+  }
 }
 
 window.addEventListener('DOMContentLoaded', init);
