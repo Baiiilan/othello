@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>黑白棋 Othello</title>
+<style>
+  :root { --is-mobile: 0; }
+  @media (orientation: portrait) and (max-width: 1024px) { :root { --is-mobile: 1; } }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #1a2f3a;
+    font-family: 'Courier New', Courier, monospace;
+  }
+  body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+  #container {
+    position: absolute;
+    left: 0; top: 0;
+    overflow: hidden;
+    transform-origin: 0 0;
+  }
+  #main-canvas {
+    display: block;
+    cursor: default;
+    touch-action: manipulation;  /* disable double-tap zoom */
+  }
+  #button-layer {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+  }
+  .game-btn {
+    position: absolute;
+    transform: translate(-50%, 0);
+    border: none;
+    padding: 10px 28px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 14px;
+    font-weight: bold;
+    color: white;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: filter 0.15s;
+    white-space: nowrap;
+  }
+  .game-btn:hover { filter: brightness(1.25); }
+  .game-btn:active { filter: brightness(0.9); }
+  .game-btn.small {
+    font-size: 12px;
+    padding: 8px 20px;
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="main-canvas"></canvas>
+  <div id="button-layer"></div>
+</div>
+
+<script>
+// ============================================================================
+//  Constants & Enums
+// ============================================================================
+
+const Stone = Object.freeze({ EMPTY: 0, BLACK: 1, WHITE: 2 });
+function opponent(s) {
+  if (s === Stone.BLACK) return Stone.WHITE;
+  if (s === Stone.WHITE) return Stone.BLACK;
+  return Stone.EMPTY;
+}
+function stoneName(s) { return s === Stone.BLACK ? 'Black' : 'White'; }
+
+const DIRECTIONS = [
+  [-1,-1], [-1, 0], [-1, 1],
+  [ 0,-1],          [ 0, 1],
+  [ 1,-1], [ 1, 0], [ 1, 1]
+];
+
+const WEIGHT_BOARD = [
+  [100, -20,  10,   5,   5,  10, -20, 100],
+  [-20, -50,  -2,  -2,  -2,  -2, -50, -20],
+  [ 10,  -2,   1,   1,   1,   1,  -2,  10],
+  [  5,  -2,   1,   0,   0,   1,  -2,   5],
+  [  5,  -2,   1,   0,   0,   1,  -2,   5],
+  [ 10,  -2,   1,   1,   1,   1,  -2,  10],
+  [-20, -50,  -2,  -2,  -2,  -2, -50, -20],
+  [100, -20,  10,   5,   5,  10, -20, 100],
+];
+
+// ── Colors ──
+const COLOR_BG           = '#3e2723';
+const COLOR_BOARD        = '#c49a3c';
+const COLOR_BOARD_DARK   = '#b8902c';
+const COLOR_BOARD_LIGHT  = '#d0a84c';
+const COLOR_LINE         = '#5d3a1a';
+const COLOR_BLACK_STONE  = '#1a1a1a';
+const COLOR_WHITE_STONE  = '#faf0dc';
+const COLOR_HIGHLIGHT    = '#e8a840';
+const COLOR_LAST_MOVE    = '#ff6d3a';
+const COLOR_VALID_HINT   = '#ffb347';
+const COLOR_TEXT         = '#f5e6cc';
+const COLOR_TITLE        = '#ffa726';
+const COLOR_INFO_BG      = '#2c1a0e';
+const COLOR_FRAME_OUTER  = '#2a1506';
+const COLOR_FRAME_MID    = '#4e342e';
+const COLOR_FRAME_INNER  = '#6d4c41';
+const COLOR_SHADOW       = '#1a0e06';
+
+// ── Layout configs (switched by device) ──
+const DESKTOP_CFG = {
+  WINDOW_W: 1280, WINDOW_H: 800,
+  get BOARD_GRID() { return 560; },
+  get CELL_SIZE() { return this.BOARD_GRID / 8; },
+  get BOARD_OX() { return (this.WINDOW_W - this.BOARD_GRID) / 2; },
+  BOARD_OY: 80,
+  BG_PATH: 'othello_bg.jpg',
+};
+
+const MOBILE_CFG = {
+  WINDOW_W: 800, WINDOW_H: 1100,
+  get BOARD_GRID() { return 520; },
+  get CELL_SIZE() { return this.BOARD_GRID / 8; },
+  get BOARD_OX() { return (this.WINDOW_W - this.BOARD_GRID) / 2; },
+  BOARD_OY: 340,
+  BG_PATH: 'othello_bg_mobile.jpg',
+};
+
+let CFG = DESKTOP_CFG;  // default, may switch to MOBILE_CFG in detectDevice()
+
+// ============================================================================
+//  Game Logic
+// ============================================================================
+
+class OthelloGame {
+  constructor() {
+    this.board = [];
+    this.currentPlayer = Stone.BLACK;
+    this.reset();
+  }
+
+  reset() {
+    this.board = Array.from({length: 8}, () => Array(8).fill(Stone.EMPTY));
+    this.board[3][3] = Stone.WHITE;
+    this.board[3][4] = Stone.BLACK;
+    this.board[4][3] = Stone.BLACK;
+    this.board[4][4] = Stone.WHITE;
+    this.currentPlayer = Stone.BLACK;
+  }
+
+  copy() {
+    const g = new OthelloGame();
+    g.board = this.board.map(row => [...row]);
+    g.currentPlayer = this.currentPlayer;
+    return g;
+  }
+
+  inBounds(r, c) { return r >= 0 && r < 8 && c >= 0 && c < 8; }
+
+  isValidMove(r, c, player) {
+    if (!this.inBounds(r, c) || this.board[r][c] !== Stone.EMPTY) return false;
+    const opp = opponent(player);
+    for (const [dr, dc] of DIRECTIONS) {
+      let nr = r + dr, nc = c + dc, found = false;
+      while (this.inBounds(nr, nc) && this.board[nr][nc] === opp) {
+        nr += dr; nc += dc; found = true;
+      }
+      if (found && this.inBounds(nr, nc) && this.board[nr][nc] === player) return true;
+    }
+    return false;
+  }
+
+  getValidMoves(player) {
+    const moves = [];
+    for (let r = 0; r < 8; r++)
+      for (let c = 0; c < 8; c++)
+        if (this.isValidMove(r, c, player)) moves.push({r, c});
+    return moves;
+  }
+
+  flippedStones(r, c, player) {
+    const flipped = [];
+    const opp = opponent(player);
+    for (const [dr, dc] of DIRECTIONS) {
+      let nr = r + dr, nc = c + dc;
+      const line = [];
+      while (this.inBounds(nr, nc) && this.board[nr][nc] === opp) {
+        line.push({r: nr, c: nc});
+        nr += dr; nc += dc;
+      }
+      if (line.length > 0 && this.inBounds(nr, nc) && this.board[nr][nc] === player)
+        flipped.push(...line);
+    }
+    return flipped;
+  }
+
+  applyMove(r, c) {
+    const player = this.currentPlayer;
+    this.board[r][c] = player;
+    for (const {r: fr, c: fc} of this.flippedStones(r, c, player))
+      this.board[fr][fc] = player;
+    this.currentPlayer = opponent(this.currentPlayer);
+  }
+
+  count() {
+    let black = 0, white = 0;
+    for (let r = 0; r < 8; r++)
+      for (let c = 0; c < 8; c++)
+        if (this.board[r][c] === Stone.BLACK) black++;
+        else if (this.board[r][c] === Stone.WHITE) white++;
+    return { [Stone.BLACK]: black, [Stone.WHITE]: white, empty: 64 - black - white };
+  }
+
+  isGameOver() {
+    return this.getValidMoves(Stone.BLACK).length === 0
+        && this.getValidMoves(Stone.WHITE).length === 0;
+  }
+
+  winner() {
+    const cnt = this.count();
+    if (cnt[Stone.BLACK] > cnt[Stone.WHITE]) return Stone.BLACK;
+    if (cnt[Stone.WHITE] > cnt[Stone.BLACK]) return Stone.WHITE;
+    return null;
+  }
+}
+
+// ============================================================================
+//  AI Players
+// ============================================================================
+
+class AIPlayer {
+  chooseMove(game, player) {
+    const moves = game.getValidMoves(player);
+    return moves.length > 0 ? moves[0] : null;
+  }
+}
+
+class GreedyAI extends AIPlayer {
+  chooseMove(game, player) {
+    const moves = game.getValidMoves(player);
+    if (moves.length === 0) return null;
+    let best = moves[0], bestFlips = -1;
+    for (const m of moves) {
+      const flips = game.flippedStones(m.r, m.c, player).length;
+      if (flips > bestFlips) { bestFlips = flips; best = m; }
+    }
+    return best;
+  }
+}
+
+class HeuristicAI extends AIPlayer {
+  static evaluate(game, player) {
+    const opp = opponent(player);
+    let score = 0;
+    for (let r = 0; r < 8; r++)
+      for (let c = 0; c < 8; c++) {
+        if (game.board[r][c] === player) score += WEIGHT_BOARD[r][c];
+        else if (game.board[r][c] === opp) score -= WEIGHT_BOARD[r][c];
+      }
+    score += (game.getValidMoves(player).length - game.getValidMoves(opp).length) * 5;
+    const corners = [[0,0],[0,7],[7,0],[7,7]];
+    for (const [r,c] of corners) {
+      if (game.board[r][c] === player) score += 50;
+      else if (game.board[r][c] === opp) score -= 50;
+    }
+    return score;
+  }
+
+  chooseMove(game, player) {
+    const moves = game.getValidMoves(player);
+    if (moves.length === 0) return null;
+    let best = moves[0], bestScore = -Infinity;
+    for (const m of moves) {
+      const sim = game.copy();
+      sim.board[m.r][m.c] = player;
+      for (const {r: fr, c: fc} of sim.flippedStones(m.r, m.c, player))
+        sim.board[fr][fc] = player;
+      const opMoves = sim.getValidMoves(opponent(player));
+      let score;
+      if (opMoves.length > 0) {
+        let worst = Infinity;
+        for (const om of opMoves) {
+          const opSim = sim.copy();
+          opSim.board[om.r][om.c] = opponent(player);
+          for (const {r: fr, c: fc} of opSim.flippedStones(om.r, om.c, opponent(player)))
+            opSim.board[fr][fc] = opponent(player);
+          worst = Math.min(worst, HeuristicAI.evaluate(opSim, player));
+        }
+        score = worst;
+      } else {
+        score = HeuristicAI.evaluate(sim, player);
+      }
+      if (score > bestScore) { bestScore = score; best = m; }
+    }
+    return best;
+  }
+}
+
+class MinimaxAI extends AIPlayer {
+  constructor() { super(); this.MAX_DEPTH = 5; }
+
+  static evaluate(game, player) {
+    const cnt = game.count();
+    if (cnt[Stone.BLACK] + cnt[Stone.WHITE] > 54)
+      return cnt[player] - cnt[opponent(player)];
+    return HeuristicAI.evaluate(game, player);
+  }
+
+  minimax(game, depth, alpha, beta, maximizing, player) {
+    if (depth === 0 || game.isGameOver())
+      return MinimaxAI.evaluate(game, player);
+    const current = maximizing ? player : opponent(player);
+    const moves = game.getValidMoves(current);
+    if (moves.length === 0)
+      return this.minimax(game, depth - 1, alpha, beta, !maximizing, player);
+    if (maximizing) {
+      let maxEval = -Infinity;
+      for (const m of moves) {
+        const sim = game.copy();
+        sim.applyMove(m.r, m.c);
+        const val = this.minimax(sim, depth - 1, alpha, beta, false, player);
+        maxEval = Math.max(maxEval, val);
+        alpha = Math.max(alpha, val);
+        if (beta <= alpha) break;
+      }
+      return maxEval;
+    } else {
+      let minEval = Infinity;
+      for (const m of moves) {
+        const sim = game.copy();
+        sim.applyMove(m.r, m.c);
+        const val = this.minimax(sim, depth - 1, alpha, beta, true, player);
+        minEval = Math.min(minEval, val);
+        beta = Math.min(beta, val);
+        if (beta <= alpha) break;
+      }
+      return minEval;
+    }
+  }
+
+  chooseMove(game, player) {
+    const moves = game.getValidMoves(player);
+    if (moves.length === 0) return null;
+    moves.sort((a, b) =>
+      game.flippedStones(b.r, b.c, player).length -
+      game.flippedStones(a.r, a.c, player).length
+    );
+    let best = moves[0], bestScore = -Infinity;
+    let alpha = -Infinity, beta = Infinity;
+    for (const m of moves) {
+      const sim = game.copy();
+      sim.applyMove(m.r, m.c);
+      const val = this.minimax(sim, this.MAX_DEPTH - 1, alpha, beta, false, player);
+      if (val > bestScore) { bestScore = val; best = m; }
+      alpha = Math.max(alpha, val);
+    }
+    return best;
+  }
+}
+
+// ============================================================================
+//  Canvas & Rendering
+// ============================================================================
+
+const mainCanvas = document.getElementById('main-canvas');
+const mainCtx = mainCanvas.getContext('2d');
+const buttonLayer = document.getElementById('button-layer');
+
+// Offscreen canvas for static content (background + board)
+const offscreen = document.createElement('canvas');
+offscreen.width = CFG.WINDOW_W; offscreen.height = CFG.WINDOW_H;
+const offCtx = offscreen.getContext('2d');
+
+let bgImageLoaded = false;
+let bgImage = null;
+let _lastBgPath = '';  // track which image was loaded last
+
+// ── Font helpers ──
+function setFont(ctx, size, bold) {
+  ctx.font = `${bold ? 'bold ' : ''}${size}px "Courier New", Courier, monospace`;
+}
+
+// ── Background ──
+function loadBackground() {
+  const path = CFG.BG_PATH;
+  if (path === _lastBgPath && bgImageLoaded) return;  // already loaded this image
+  _lastBgPath = path;
+  bgImageLoaded = false;
+
+  bgImage = new Image();
+  bgImage.onload = () => {
+    bgImageLoaded = true;
+    drawOffscreenBackground();
+    if (App.screen === 'PLAYING') drawOffscreenBoard();
+    redrawCurrentScreen();
+  };
+  bgImage.onerror = () => {
+    bgImageLoaded = false;
+    console.warn('Background image not found:', path);
+    drawOffscreenBackground();
+    if (App.screen === 'PLAYING') drawOffscreenBoard();
+    redrawCurrentScreen();
+  };
+  bgImage.src = path;
+}
+
+function drawOffscreenBackground() {
+  offCtx.clearRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  if (bgImageLoaded && bgImage) {
+    offCtx.drawImage(bgImage, 0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  } else {
+    // Radial gradient fallback (100 steps)
+    const cx = CFG.WINDOW_W / 2, cy = CFG.WINDOW_H / 2;
+    const maxR = Math.sqrt(cx*cx + cy*cy) / 2 + 30;
+    for (let i = 100; i >= 0; i--) {
+      const t = i / 100, r = Math.floor(maxR * t);
+      const rc = Math.floor(0x3e + (0x6b - 0x3e) * (1 - t));
+      const gc = Math.floor(0x27 + (0x8a - 0x27) * (1 - t));
+      const bc = Math.floor(0x23 + (0x60 - 0x23) * (1 - t));
+      offCtx.fillStyle = `#${rc.toString(16).padStart(2,'0')}${gc.toString(16).padStart(2,'0')}${bc.toString(16).padStart(2,'0')}`;
+      offCtx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    }
+  }
+}
+
+// ── Static Board ──
+function drawOffscreenBoard() {
+  const ctx = offCtx;
+  const ox = CFG.BOARD_OX, oy = CFG.BOARD_OY, b = CFG.BOARD_GRID;
+
+  // Shadow
+  ctx.fillStyle = COLOR_SHADOW;
+  ctx.fillRect(ox - 6, oy - 6, b + 12, b + 12);
+
+  // Three-layer wood frame
+  const frames = [
+    { w: 5, c: COLOR_FRAME_OUTER, o: 0 },
+    { w: 4, c: COLOR_FRAME_MID, o: 2 },
+    { w: 3, c: COLOR_FRAME_INNER, o: 4 },
+  ];
+  for (const {w, c, o} of frames) {
+    ctx.fillStyle = c;
+    const d = 4 + o + w;
+    ctx.fillRect(ox - d, oy - d, b + d*2, b + d*2);
+  }
+
+  // Board surface
+  ctx.fillStyle = COLOR_BOARD;
+  ctx.fillRect(ox - 1, oy - 1, b + 2, b + 2);
+  ctx.strokeStyle = COLOR_LINE;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(ox - 1, oy - 1, b + 2, b + 2);
+
+  // Alternating cells
+  for (let r = 0; r < 8; r++)
+    for (let c = 0; c < 8; c++) {
+      ctx.fillStyle = (r + c) % 2 === 0 ? COLOR_BOARD_LIGHT : COLOR_BOARD_DARK;
+      ctx.fillRect(ox + c * CFG.CELL_SIZE + 1, oy + r * CFG.CELL_SIZE + 1,
+                   CFG.CELL_SIZE - 1, CFG.CELL_SIZE - 1);
+    }
+
+  // Grid lines
+  ctx.strokeStyle = COLOR_LINE;
+  ctx.lineWidth = 2;
+  for (let i = 0; i <= 8; i++) {
+    const x = ox + i * CFG.CELL_SIZE, y = oy + i * CFG.CELL_SIZE;
+    ctx.beginPath(); ctx.moveTo(x, oy); ctx.lineTo(x, oy + b); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ox, y); ctx.lineTo(ox + b, y); ctx.stroke();
+  }
+
+  // Star positions
+  ctx.fillStyle = COLOR_LINE;
+  for (const [r, c] of [[2,2],[2,5],[5,2],[5,5]]) {
+    const sx = ox + c * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+    const sy = oy + r * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+    ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // Coordinate labels
+  setFont(ctx, 9, true);
+  ctx.fillStyle = COLOR_TEXT;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const cols = 'ABCDEFGH';
+  for (let i = 0; i < 8; i++) {
+    const cx = ox + i * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+    const cy = oy + i * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+    ctx.fillText(cols[i], cx, oy - 14);
+    ctx.fillText(cols[i], cx, oy + b + 14);
+    ctx.fillText(String(i + 1), ox - 14, cy);
+    ctx.fillText(String(i + 1), ox + b + 14, cy);
+  }
+}
+
+// ── 3D Stone ──
+function drawStone(ctx, r, c, stone) {
+  const ox = CFG.BOARD_OX, oy = CFG.BOARD_OY;
+  const pad = 3;
+  const cx = ox + c * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+  const cy = oy + r * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+  const rMax = (CFG.CELL_SIZE - pad * 2) / 2;
+
+  // Shadow
+  ctx.fillStyle = COLOR_SHADOW;
+  ctx.beginPath();
+  ctx.ellipse(cx + 3, cy + 3, rMax, rMax * 0.95, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Radial gradient body
+  const grad = ctx.createRadialGradient(
+    cx - rMax * 0.15, cy - rMax * 0.25, rMax * 0.05,
+    cx, cy, rMax
+  );
+
+  if (stone === Stone.BLACK) {
+    grad.addColorStop(0.15, '#6e6e6e');
+    grad.addColorStop(0.28, '#5c5c5c');
+    grad.addColorStop(0.42, '#4d4d4d');
+    grad.addColorStop(0.55, '#3f3f3f');
+    grad.addColorStop(0.67, '#333333');
+    grad.addColorStop(0.78, '#282828');
+    grad.addColorStop(0.87, '#1e1e1e');
+    grad.addColorStop(0.94, '#151515');
+    grad.addColorStop(1.00, '#0d0d0d');
+  } else {
+    grad.addColorStop(0.15, '#fdfbf7');
+    grad.addColorStop(0.28, '#faf7f0');
+    grad.addColorStop(0.42, '#f7f3ea');
+    grad.addColorStop(0.55, '#f3eee2');
+    grad.addColorStop(0.67, '#ede6d6');
+    grad.addColorStop(0.78, '#e5ddca');
+    grad.addColorStop(0.87, '#dbd2bb');
+    grad.addColorStop(0.94, '#cfc5a8');
+    grad.addColorStop(1.00, '#c4b896');
+  }
+
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rMax, rMax * 0.95, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Outline
+  ctx.strokeStyle = stone === Stone.BLACK ? '#222222' : '#b8a880';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, rMax, rMax * 0.95, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Highlight spots
+  if (stone === Stone.BLACK) {
+    ctx.fillStyle = '#909090';
+    ctx.beginPath(); ctx.ellipse(cx - 5, cy - 9, 3, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#aaaaaa';
+    ctx.beginPath(); ctx.ellipse(cx - 3, cy - 11, 1.5, 2, 0, 0, Math.PI * 2); ctx.fill();
+  } else {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.ellipse(cx - 4, cy - 8, 3, 4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(cx - 2, cy - 10, 1.5, 2, 0, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// ── Dynamic Board Update ──
+function updateBoard() {
+  const ctx = mainCtx;
+  ctx.clearRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  ctx.drawImage(offscreen, 0, 0);  // blit cached background + board
+
+  // Stones
+  for (let r = 0; r < 8; r++)
+    for (let c = 0; c < 8; c++)
+      if (App.game.board[r][c] !== Stone.EMPTY)
+        drawStone(ctx, r, c, App.game.board[r][c]);
+
+  // Last move highlight
+  if (App.lastMove) {
+    const {r, c} = App.lastMove;
+    const x1 = CFG.BOARD_OX + c * CFG.CELL_SIZE + 2;
+    const y1 = CFG.BOARD_OY + r * CFG.CELL_SIZE + 2;
+    ctx.strokeStyle = COLOR_LAST_MOVE;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x1, y1, CFG.CELL_SIZE - 4, CFG.CELL_SIZE - 4);
+  }
+
+  // Valid move hints (only for human player)
+  const current = App.game.currentPlayer;
+  const isAiTurn = App.gameMode === 'pve' && current === opponent(App.humanSide);
+  if (!isAiTurn && !App.matchOver && App.screen === 'PLAYING') {
+    const moves = App.game.getValidMoves(current);
+    for (const {r, c} of moves) {
+      const hx = CFG.BOARD_OX + c * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+      const hy = CFG.BOARD_OY + r * CFG.CELL_SIZE + CFG.CELL_SIZE / 2;
+      ctx.fillStyle = COLOR_VALID_HINT;
+      ctx.beginPath(); ctx.arc(hx, hy, 5, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = COLOR_VALID_HINT;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(hx, hy, 8, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  // ── UI Text ──
+  const cnt = App.game.count();
+  const cx = CFG.WINDOW_W / 2;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Title
+  setFont(ctx, 12, true);
+  ctx.fillStyle = COLOR_TITLE;
+  ctx.fillText(':: OTHELLO ::', cx, 22);
+
+  // Mode / Difficulty / Format tags
+  setFont(ctx, 10, true);
+  const modeText = App.gameMode === 'pve' ? 'PvE' : 'PvP';
+  const diffText = { easy: 'EASY', medium: 'MED', hard: 'HARD' }[App.difficulty] || '-';
+  const fmtText = formatLabel();
+  const tagY = 44;
+  const tags = [
+    { t: modeText, c: '#ffcc80' }, { t: diffText, c: '#ffab40' }, { t: fmtText, c: '#efebe9' }
+  ];
+  let tx = cx - 120;
+  for (let i = 0; i < tags.length; i++) {
+    ctx.fillStyle = tags[i].c;
+    ctx.fillText(tags[i].t, tx, tagY);
+    tx += 80;
+    if (i < tags.length - 1) { ctx.fillStyle = COLOR_TITLE; ctx.fillText('|', tx, tagY); tx += 20; }
+  }
+
+  // Quick score (top-right)
+  setFont(ctx, 11, true);
+  ctx.fillStyle = COLOR_TITLE;
+  ctx.textAlign = 'right';
+  ctx.fillText(`# ${cnt[Stone.BLACK]} : ${cnt[Stone.WHITE]} O`, CFG.WINDOW_W - 40, 22);
+  ctx.textAlign = 'center';
+
+  // Flash message
+  if (App.flashText) {
+    setFont(ctx, 10, true);
+    ctx.fillStyle = '#ffab40';
+    ctx.fillText(App.flashText, cx, 68);
+  }
+
+  // Bottom info area (tightened to fit within CFG.WINDOW_H=800)
+  const infoY = CFG.BOARD_OY + CFG.BOARD_GRID + 18;  // board bottom + 18
+
+  // Decorative line
+  ctx.strokeStyle = COLOR_TITLE;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx - 200, infoY); ctx.lineTo(cx + 200, infoY); ctx.stroke();
+
+  // Large scores
+  const scoreY = infoY + 24;
+  setFont(ctx, 32, true);
+  ctx.fillStyle = '#cccccc';
+  ctx.fillText(String(cnt[Stone.BLACK]), cx - 70, scoreY);
+  ctx.fillStyle = COLOR_TITLE;
+  ctx.fillText(':', cx, scoreY);
+  ctx.fillStyle = '#faf0dc';
+  ctx.fillText(String(cnt[Stone.WHITE]), cx + 70, scoreY);
+
+  // Turn indicator
+  const turnY = scoreY + 30;
+  const dotColor = current === Stone.BLACK ? COLOR_BLACK_STONE : COLOR_WHITE_STONE;
+  ctx.fillStyle = dotColor;
+  ctx.beginPath(); ctx.arc(cx - 72, turnY, 8, 0, Math.PI * 2); ctx.fill();
+  setFont(ctx, 14, true);
+  ctx.fillStyle = current === Stone.BLACK ? '#cccccc' : '#faf0dc';
+  ctx.textAlign = 'left';
+  ctx.fillText(stoneName(current), cx - 20, turnY);
+  ctx.textAlign = 'center';
+
+  // Match score
+  const matchY = turnY + 18;
+  setFont(ctx, 10, true);
+  ctx.fillStyle = COLOR_TITLE;
+  ctx.textAlign = 'left';
+  ctx.fillText(scoreText(), cx + 60, matchY);
+  ctx.textAlign = 'center';
+}
+
+// ── Menu Header ──
+function drawMenuHeader(title, subtitle) {
+  const ctx = mainCtx;
+  const cx = CFG.WINDOW_W / 2;
+  let y = 80;
+  setFont(ctx, 26, true);
+  ctx.fillStyle = COLOR_TITLE;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(title, cx, y);
+  y += 40;
+  ctx.strokeStyle = COLOR_TITLE;
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx - 150, y); ctx.lineTo(cx + 150, y); ctx.stroke();
+  y += 20;
+  if (subtitle) {
+    setFont(ctx, 12, false);
+    ctx.fillStyle = COLOR_TEXT;
+    ctx.fillText(subtitle, cx, y);
+    y += 32;
+  }
+  return y + 8;
+}
+
+// ── Overlay ──
+function drawOverlay(title, lines, buttons) {
+  App.overlayActive = true;
+  const ctx = mainCtx;
+  const cx = CFG.WINDOW_W / 2;
+
+  // Dark mask
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  ctx.globalAlpha = 1.0;
+
+  // Dialog box
+  const dw = 520, dh = Math.max(240, 140 + lines.length * 22);
+  const dx = (CFG.WINDOW_W - dw) / 2, dy = (CFG.WINDOW_H - dh) / 2;
+  ctx.fillStyle = COLOR_INFO_BG;
+  ctx.fillRect(dx, dy, dw, dh);
+  ctx.strokeStyle = COLOR_TITLE;
+  ctx.lineWidth = 3;
+  ctx.strokeRect(dx, dy, dw, dh);
+
+  // Title
+  setFont(ctx, 18, true);
+  ctx.fillStyle = COLOR_TITLE;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(title, cx, dy + 38);
+
+  // Separator
+  ctx.strokeStyle = COLOR_TITLE;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(dx + 60, dy + 62); ctx.lineTo(dx + dw - 60, dy + 62); ctx.stroke();
+
+  // Message lines
+  let y = dy + 90;
+  setFont(ctx, 12, false);
+  ctx.fillStyle = COLOR_TEXT;
+  for (const line of lines) {
+    ctx.fillText(line, cx, y);
+    y += 24;
+  }
+
+  // Buttons
+  const btnW = 130, gap = 20;
+  const totalW = buttons.length * btnW + (buttons.length - 1) * gap;
+  const startX = cx - totalW / 2 + btnW / 2;
+  const btnY = dy + dh - 50;
+  for (let i = 0; i < buttons.length; i++) {
+    const [text, color, cb] = buttons[i];
+    const bx = startX + i * (btnW + gap);
+    createOverlayButton(text, bx, btnY - 18, color, cb);  // -18 for half button height
+  }
+}
+
+function dismissOverlay(callback) {
+  App.overlayActive = false;
+  // Remove only overlay buttons, keep game buttons intact
+  overlayButtons.forEach(b => b.remove());
+  overlayButtons = [];
+  if (App.screen === 'PLAYING') updateBoard();
+  if (callback) callback();
+}
+
+// ============================================================================
+//  Button Management
+// ============================================================================
+
+let overlayButtons = [];
+
+function clearButtons() {
+  // Remove all buttons (for screen transitions)
+  overlayButtons = [];
+  while (buttonLayer.firstChild) buttonLayer.removeChild(buttonLayer.firstChild);
+}
+
+function createButton(text, cx, cy, bgColor, onClick, small) {
+  const btn = document.createElement('button');
+  btn.textContent = text;
+  btn.className = 'game-btn' + (small ? ' small' : '');
+  btn.style.left = cx + 'px';
+  btn.style.top = cy + 'px';
+  btn.style.background = bgColor;
+  btn.addEventListener('click', onClick);
+  // Hover effect restoration via inline style
+  btn.addEventListener('mouseenter', () => btn.style.filter = 'brightness(1.25)');
+  btn.addEventListener('mouseleave', () => btn.style.filter = '');
+  buttonLayer.appendChild(btn);
+  return btn;
+}
+
+function createOverlayButton(text, cx, cy, bgColor, onClick) {
+  const btn = document.createElement('button');
+  btn.textContent = text;
+  btn.className = 'game-btn';
+  btn.style.left = cx + 'px';
+  btn.style.top = cy + 'px';
+  btn.style.background = bgColor;
+  btn.addEventListener('click', () => {
+    dismissOverlay(onClick);
+  });
+  buttonLayer.appendChild(btn);
+  overlayButtons.push(btn);
+  return btn;
+}
+
+// ============================================================================
+//  App State
+// ============================================================================
+
+const App = {
+  screen: 'MENU',          // 'MENU' | 'SIDE' | 'DIFFICULTY' | 'FORMAT' | 'PLAYING'
+  game: new OthelloGame(),
+  gameMode: '',            // 'pve' | 'pvp'
+  difficulty: '',          // 'easy' | 'medium' | 'hard'
+  matchFormat: '',         // 'best1' | 'best3' | 'best5'
+  winsNeeded: 1,
+  aiPlayer: null,
+  scores: { [Stone.BLACK]: 0, [Stone.WHITE]: 0 },
+  gamesPlayed: 0,
+  matchOver: false,
+  humanSide: Stone.BLACK,
+  lastMove: null,
+  overlayActive: false,
+  flashText: '',
+  flashTimer: null,
+  aiTimer: null,
+};
+
+// ── Helpers ──
+function formatLabel() {
+  return { best1: '单局胜负', best3: '三局两胜', best5: '五局三胜' }[App.matchFormat] || '未知';
+}
+
+function scoreText() {
+  return `Match: # ${App.scores[Stone.BLACK]} : ${App.scores[Stone.WHITE]} O  (${formatLabel()}, first to ${App.winsNeeded})`;
+}
+
+function flashMessage(text, duration) {
+  App.flashText = text;
+  if (App.flashTimer) clearTimeout(App.flashTimer);
+  App.flashTimer = setTimeout(() => {
+    App.flashText = '';
+    if (App.screen === 'PLAYING' && !App.overlayActive) updateBoard();
+  }, duration);
+  if (App.screen === 'PLAYING') updateBoard();
+}
+
+// ── Redraw helper ──
+function redrawCurrentScreen() {
+  switch (App.screen) {
+    case 'MENU': showMenuScreen(); break;
+    case 'SIDE': chooseSideScreen(); break;
+    case 'DIFFICULTY': chooseDifficultyScreen(); break;
+    case 'FORMAT': chooseFormatScreen(); break;
+    case 'PLAYING': updateBoard(); break;
+  }
+}
+
+// ============================================================================
+//  Screen: Main Menu
+// ============================================================================
+
+function showMenu() {
+  App.screen = 'MENU';
+  clearButtons();
+  if (App.aiTimer) { clearTimeout(App.aiTimer); App.aiTimer = null; }
+  if (App.flashTimer) { clearTimeout(App.flashTimer); App.flashTimer = null; }
+  drawOffscreenBackground();  // wipe board from offscreen cache
+  showMenuScreen();
+}
+
+function showMenuScreen() {
+  mainCtx.clearRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  mainCtx.drawImage(offscreen, 0, 0);  // background only (no board yet)
+
+  let y = drawMenuHeader('::  O T H E L L O  ::', '黑白棋 - 多阶梯 - 多赛制');
+  const cx = CFG.WINDOW_W / 2;
+
+  const btns = [
+    ['[VS]  人 机 对 战', '#c75b39', selectPvE],
+    ['[2P]  双 人 对 战', '#8d6e63', selectPvP],
+    ['[X]  退 出 游 戏', '#a04030', () => {}],
+  ];
+  for (const [text, color, cb] of btns) {
+    createButton(text, cx, y, color, cb);
+    y += 56;
+  }
+}
+
+function selectPvE() { App.gameMode = 'pve'; chooseSide(); }
+function selectPvP() { App.gameMode = 'pvp'; App.difficulty = ''; App.aiPlayer = null; chooseFormat(); }
+
+// ============================================================================
+//  Screen: Choose Side
+// ============================================================================
+
+function chooseSide() {
+  App.screen = 'SIDE';
+  clearButtons();
+  drawOffscreenBackground();
+  chooseSideScreen();
+}
+
+function chooseSideScreen() {
+  mainCtx.clearRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  mainCtx.drawImage(offscreen, 0, 0);
+
+  let y = drawMenuHeader('选择棋子颜色', '黑子先行 - 白子后手');
+  const cx = CFG.WINDOW_W / 2;
+
+  createButton('[B]  执 黑 先 行', cx, y, COLOR_BLACK_STONE, () => setHumanSide(Stone.BLACK));
+  y += 56;
+
+  // White button with dark text
+  const wBtn = document.createElement('button');
+  wBtn.textContent = '[W]  执 白 后 手';
+  wBtn.className = 'game-btn';
+  wBtn.style.left = cx + 'px'; wBtn.style.top = y + 'px';
+  wBtn.style.background = COLOR_WHITE_STONE;
+  wBtn.style.color = '#3e2723';
+  wBtn.addEventListener('click', () => setHumanSide(Stone.WHITE));
+  buttonLayer.appendChild(wBtn);
+  y += 56;
+
+  createButton('<< 返回菜单', cx, y, '#6d4c41', showMenu);
+}
+
+function setHumanSide(side) { App.humanSide = side; chooseDifficulty(); }
+
+// ============================================================================
+//  Screen: Choose Difficulty
+// ============================================================================
+
+function chooseDifficulty() {
+  App.screen = 'DIFFICULTY';
+  clearButtons();
+  drawOffscreenBackground();
+  chooseDifficultyScreen();
+}
+
+function chooseDifficultyScreen() {
+  mainCtx.clearRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  mainCtx.drawImage(offscreen, 0, 0);
+
+  let y = drawMenuHeader('选择 AI 难度', '贪心策略 - 启发式 - 极大极小');
+  const cx = CFG.WINDOW_W / 2;
+
+  for (const [text, color, diff] of [
+    ['[E]  简 单  -  贪 心 策 略', '#6b8e5a', 'easy'],
+    ['[M]  中 等  -  启 发 式 策 略', '#d4843a', 'medium'],
+    ['[H]  困 难  -  极 大 极 小 算 法', '#b5452c', 'hard'],
+  ]) {
+    createButton(text, cx, y, color, () => setDifficulty(diff));
+    y += 56;
+  }
+
+  createButton('<< 返回菜单', cx, y, '#6d4c41', showMenu);
+}
+
+function setDifficulty(diff) {
+  App.difficulty = diff;
+  if (diff === 'easy') App.aiPlayer = new GreedyAI();
+  else if (diff === 'medium') App.aiPlayer = new HeuristicAI();
+  else App.aiPlayer = new MinimaxAI();
+  chooseFormat();
+}
+
+// ============================================================================
+//  Screen: Choose Format
+// ============================================================================
+
+function chooseFormat() {
+  App.screen = 'FORMAT';
+  clearButtons();
+  drawOffscreenBackground();
+  chooseFormatScreen();
+}
+
+function chooseFormatScreen() {
+  mainCtx.clearRect(0, 0, CFG.WINDOW_W, CFG.WINDOW_H);
+  mainCtx.drawImage(offscreen, 0, 0);
+
+  let y = drawMenuHeader('选择赛制', '单局决胜 - 三局两胜 - 五局三胜');
+  const cx = CFG.WINDOW_W / 2;
+
+  for (const [text, fmt, wins] of [
+    ['[1]  单 局 胜 负', 'best1', 1],
+    ['[3]  三 局 两 胜', 'best3', 2],
+    ['[5]  五 局 三 胜', 'best5', 3],
+  ]) {
+    createButton(text, cx, y, '#5d4037', () => setFormat(fmt, wins));
+    y += 56;
+  }
+
+  createButton('<< 返回菜单', cx, y, '#6d4c41', showMenu);
+}
+
+function setFormat(fmt, wins) { App.matchFormat = fmt; App.winsNeeded = wins; startMatch(); }
+
+// ============================================================================
+//  Match Management
+// ============================================================================
+
+function startMatch() {
+  App.scores = { [Stone.BLACK]: 0, [Stone.WHITE]: 0 };
+  App.gamesPlayed = 0;
+  App.matchOver = false;
+  startNewGame();
+}
+
+function startNewGame() {
+  App.game.reset();
+  App.matchOver = false;
+  App.lastMove = null;
+  App.gamesPlayed++;
+  App.screen = 'PLAYING';
+  App.overlayActive = false;
+  clearButtons();
+
+  // Draw board to offscreen (now that board_ox/oy are known)
+  drawOffscreenBackground();
+  drawOffscreenBoard();
+
+  buildGameUI();
+  afterMoveCheck();
+}
+
+function buildGameUI() {
+  updateBoard();
+
+  // Game buttons (infoY=658, scoreY=682, turnY=712, matchY=730, btnY=760)
+  const cx = CFG.WINDOW_W / 2;
+  const btnY = CFG.BOARD_OY + CFG.BOARD_GRID + 18 + 24 + 30 + 18 + 30;
+
+  createButton('[*] RESTART', cx - 80, btnY, '#c75b39', restartGame, true);
+  createButton('[H] MENU', cx + 80, btnY, '#6d4c41', showMenu, true);
+}
+
+// ============================================================================
+//  Game Flow
+// ============================================================================
+
+function placeStone(r, c) {
+  if (App.matchOver) return;
+  const player = App.game.currentPlayer;
+  if (!App.game.isValidMove(r, c, player)) return;
+
+  App.game.applyMove(r, c);
+  App.lastMove = { r, c };
+  updateBoard();
+  setTimeout(afterMoveCheck, 100);
+}
+
+function afterMoveCheck() {
+  if (App.matchOver) return;
+  const current = App.game.currentPlayer;
+
+  // Check if current player has moves
+  if (App.game.getValidMoves(current).length === 0) {
+    flashMessage(`${stoneName(current)}无合法走法，跳过回合`, 1500);
+    App.game.currentPlayer = opponent(current);
+    if (App.game.getValidMoves(App.game.currentPlayer).length === 0) {
+      flashMessage('双方均无合法走法，本局结束', 2000);
+      setTimeout(() => endGame(App.game.winner()), 2200);
+      return;
+    }
+    setTimeout(updateBoard, 100);
+    setTimeout(afterMoveCheck, 150);
+    return;
+  }
+
+  if (App.game.isGameOver()) {
+    updateBoard();
+    setTimeout(() => endGame(App.game.winner()), 500);
+    return;
+  }
+
+  updateBoard();
+
+  // Schedule AI move if applicable
+  if (App.gameMode === 'pve') {
+    const aiSide = opponent(App.humanSide);
+    if (App.game.currentPlayer === aiSide && !App.matchOver)
+      scheduleAIMove();
+  }
+}
+
+function scheduleAIMove() {
+  if (App.aiTimer) clearTimeout(App.aiTimer);
+  App.aiTimer = setTimeout(() => {
+    if (App.matchOver || App.screen !== 'PLAYING') return;
+    if (!App.aiPlayer) return;
+    const move = App.aiPlayer.chooseMove(App.game, App.game.currentPlayer);
+    if (move) placeStone(move.r, move.c);
+  }, 400);
+}
+
+function endGame(winner) {
+  if (winner !== null) App.scores[winner]++;
+  App.matchOver = true;
+  updateBoard();
+
+  if (App.scores[Stone.BLACK] >= App.winsNeeded) finishMatch(Stone.BLACK);
+  else if (App.scores[Stone.WHITE] >= App.winsNeeded) finishMatch(Stone.WHITE);
+  else askNextGame();
+}
+
+function askNextGame() {
+  const cnt = App.game.count();
+  updateBoard();  // ensure board is drawn before overlay
+  drawOverlay('本局结束', [
+    `黑子 ${cnt[Stone.BLACK]}  :  ${cnt[Stone.WHITE]}  白子`,
+    `当前比分 — 黑方 ${App.scores[Stone.BLACK]}  :  ${App.scores[Stone.WHITE]}  白方`,
+    `（赛制：${formatLabel()}）`,
+  ], [
+    ['下一局', '#c75b39', startNewGame],
+    ['返回菜单', '#6d4c41', showMenu],
+  ]);
+}
+
+function finishMatch(winner) {
+  const name = winner === Stone.BLACK ? '黑方' : '白方';
+  updateBoard();
+  drawOverlay('赛程结束！', [
+    `获胜方：${name}`,
+    `最终比分 — 黑方 ${App.scores[Stone.BLACK]}  :  ${App.scores[Stone.WHITE]}  白方`,
+    `总对局数：${App.gamesPlayed}    赛制：${formatLabel()}`,
+  ], [
+    ['返回菜单', '#c75b39', showMenu],
+  ]);
+}
+
+function restartGame() {
+  if (!App.matchOver) {
+    updateBoard();
+    drawOverlay('确认', ['确定要放弃当前对局重新开始吗？'], [
+      ['确定', '#c75b39', startNewGame],
+      ['取消', '#6d4c41', null],
+    ]);
+  } else {
+    startNewGame();
+  }
+}
+
+// ============================================================================
+//  Event Handling
+// ============================================================================
+
+// Shared tap/click handler (works for both mouse and touch)
+function handleTap(clientX, clientY) {
+  if (App.screen !== 'PLAYING') return;
+  if (App.matchOver) return;
+  if (App.overlayActive) return;
+
+  const current = App.game.currentPlayer;
+  if (App.gameMode === 'pve' && current === opponent(App.humanSide)) return;
+  if (App.game.getValidMoves(current).length === 0) return;
+
+  const rect = mainCanvas.getBoundingClientRect();
+  const scaleX = CFG.WINDOW_W / rect.width;
+  const scaleY = CFG.WINDOW_H / rect.height;
+  const x = (clientX - rect.left) * scaleX;
+  const y = (clientY - rect.top) * scaleY;
+
+  const col = Math.floor((x - CFG.BOARD_OX) / CFG.CELL_SIZE);
+  const row = Math.floor((y - CFG.BOARD_OY) / CFG.CELL_SIZE);
+
+  if (!App.game.inBounds(row, col)) return;
+  if (!App.game.isValidMove(row, col, current)) return;
+
+  placeStone(row, col);
+}
+
+mainCanvas.addEventListener('click', (e) => handleTap(e.clientX, e.clientY));
+
+mainCanvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();  // suppress mouse events and scrolling
+  if (e.touches.length === 1) handleTap(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
+
+document.addEventListener('keydown', (e) => {
+  const key = e.key.toUpperCase();
+
+  // Global: Escape dismisses overlay
+  if (App.overlayActive && key === 'ESCAPE') {
+    dismissOverlay(null);
+    return;
+  }
+
+  if (App.screen === 'PLAYING' && !App.overlayActive) {
+    if (key === 'R') { restartGame(); return; }
+    if (key === 'H') { showMenu(); return; }
+  }
+
+  if (!App.overlayActive) {
+    if (App.screen === 'SIDE') {
+      if (key === 'B') { setHumanSide(Stone.BLACK); return; }
+      if (key === 'W') { setHumanSide(Stone.WHITE); return; }
+    }
+    if (App.screen === 'DIFFICULTY') {
+      if (key === 'E') { setDifficulty('easy'); return; }
+      if (key === 'M') { setDifficulty('medium'); return; }
+      if (key === 'H') { setDifficulty('hard'); return; }
+    }
+    if (App.screen === 'FORMAT') {
+      if (key === '1') { setFormat('best1', 1); return; }
+      if (key === '3') { setFormat('best3', 2); return; }
+      if (key === '5') { setFormat('best5', 3); return; }
+    }
+  }
+});
+
+mainCanvas.addEventListener('mousemove', (e) => {
+  if (App.screen !== 'PLAYING' || App.matchOver || App.overlayActive) {
+    mainCanvas.style.cursor = 'default';
+    return;
+  }
+  const current = App.game.currentPlayer;
+  if (App.gameMode === 'pve' && current === opponent(App.humanSide)) {
+    mainCanvas.style.cursor = 'default';
+    return;
+  }
+
+  const rect = mainCanvas.getBoundingClientRect();
+  const scaleX = CFG.WINDOW_W / rect.width;
+  const scaleY = CFG.WINDOW_H / rect.height;
+  const x = (e.clientX - rect.left) * scaleX;
+  const y = (e.clientY - rect.top) * scaleY;
+  const col = Math.floor((x - CFG.BOARD_OX) / CFG.CELL_SIZE);
+  const row = Math.floor((y - CFG.BOARD_OY) / CFG.CELL_SIZE);
+
+  if (App.game.inBounds(row, col) && App.game.isValidMove(row, col, current)) {
+    mainCanvas.style.cursor = 'pointer';
+  } else {
+    mainCanvas.style.cursor = 'default';
+  }
+});
+
+// ============================================================================
+//  Device Detection & Responsive Scaling
+// ============================================================================
+
+const container = document.getElementById('container');
+
+function detectDevice() {
+  const style = getComputedStyle(document.documentElement);
+  const isMobile = style.getPropertyValue('--is-mobile').trim() === '1';
+  CFG = isMobile ? MOBILE_CFG : DESKTOP_CFG;
+  document.title = isMobile ? '黑白棋 Othello [竖屏]' : '黑白棋 Othello [横屏]';
+}
+
+function resizeCanvas() {
+  mainCanvas.width = CFG.WINDOW_W;
+  mainCanvas.height = CFG.WINDOW_H;
+  offscreen.width = CFG.WINDOW_W;
+  offscreen.height = CFG.WINDOW_H;
+  container.style.width = CFG.WINDOW_W + 'px';
+  container.style.height = CFG.WINDOW_H + 'px';
+}
+
+function fitToScreen() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const scale = Math.min(vw / CFG.WINDOW_W, vh / CFG.WINDOW_H, 1.0);
+  const ox = (vw - CFG.WINDOW_W * scale) / 2;
+  const oy = (vh - CFG.WINDOW_H * scale) / 2;
+  container.style.transform = `translate(${ox}px, ${oy}px) scale(${scale})`;
+}
+
+function onResize() {
+  const prevCfg = CFG;
+  detectDevice();
+  resizeCanvas();
+  if (CFG !== prevCfg) loadBackground();  // reload bg if device type changed
+  else drawOffscreenBackground();
+  if (App.screen === 'PLAYING') drawOffscreenBoard();
+  redrawCurrentScreen();
+  fitToScreen();
+}
+
+// ============================================================================
+//  Initialization
+// ============================================================================
+
+function init() {
+  detectDevice();
+  resizeCanvas();
+  fitToScreen();
+  drawOffscreenBackground();
+  loadBackground();
+  showMenu();
+}
+
+window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', () => setTimeout(onResize, 100));
+</script>
+</body>
+</html>
